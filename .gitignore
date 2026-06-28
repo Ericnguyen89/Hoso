@@ -1,0 +1,27 @@
+# Môi trường ảo Python
+.venv/
+venv/
+env/
+
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# File kết quả sinh ra
+Bia_ho_so*.docx
+
+# Dữ liệu đầu vào (Excel) - không đẩy dữ liệu thật lên repo
+*.xlsx
+*.xlsm
+
+# Hệ điều hành / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Tạm
+scratch*/
+_t/
+*.tmp.zip
