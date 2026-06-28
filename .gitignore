@@ -15,6 +15,9 @@ Bia_ho_so*.docx
 *.xlsx
 *.xlsm
 
+# Log của service
+*.log
+
 # Hệ điều hành / IDE
 .DS_Store
 .idea/

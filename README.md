@@ -24,11 +24,28 @@ Giữ nguyên font, khung viền và bố cục của tệp mẫu; mỗi dòng d
 | F | Thời hạn bảo quản |
 | G | Dòng phông (đầu bìa) |
 
-## Cài đặt
+## Cài đặt nhanh (tự động) — khuyến nghị
+
+```bash
+chmod +x install.sh
+./install.sh                # tạo .venv, cài thư viện + gunicorn, tạo service & chạy
+./install.sh --no-service   # chỉ cài thư viện, không tạo service
+```
+
+Script tự tạo service:
+- **Linux**: `systemd` (`hoso.service`) — tự khởi động cùng máy.
+- **macOS**: `launchd` (`com.hoso.bia`). Lưu ý: nếu đặt dự án trong `~/Documents`
+  (bị macOS bảo vệ TCC), launchd có thể bị chặn — hãy đặt dự án ngoài `~/Documents`
+  hoặc cấp *Full Disk Access*, hoặc chạy thủ công bằng gunicorn.
+
+Cấu hình qua biến môi trường: `PORT` (mặc định 5019), `HOST` (0.0.0.0),
+`WORKERS` (giữ = 1), `THREADS` (8).
+
+## Cài đặt thủ công
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt gunicorn
 ```
 
 Đặt tệp mẫu `.docx` vào thư mục dự án (mặc định dùng `Sample.docx`).
@@ -37,10 +54,18 @@ Có thể đổi thư mục mẫu bằng biến môi trường `BIA_TEMPLATE_DIR
 ## Chạy web
 
 ```bash
+# Phát triển (Flask dev server)
 .venv/bin/python app.py
+
+# Sản xuất (gunicorn, 1 worker + nhiều thread)
+.venv/bin/gunicorn --workers 1 --threads 8 --bind 0.0.0.0:5019 app:app
 ```
 
 Mở: http://127.0.0.1:5019 (lắng nghe trên `0.0.0.0`, dùng được trong LAN).
+
+> **Vì sao `--workers 1`?** File kết quả được giữ tạm trong RAM của tiến trình theo
+> token tải về. Nhiều worker sẽ khiến lượt tải rơi vào tiến trình khác (mất token).
+> Cần chịu tải cao hơn thì tăng `--threads`, đừng tăng worker.
 
 ## Chạy dòng lệnh (CLI)
 
