@@ -489,7 +489,7 @@ async function poll(jobId){
     let d;
     try{ d=await (await fetch("/jobs/"+jobId)).json(); }
     catch(_){ await sleep(600); continue; }
-    if(!d.ok){ toast(d.error||"Mất công việc",true); break; }
+    if(!d.ok){ toast(d.error||"Mất công việc",true); return false; }
 
     setProgress(d.percent);
     // cập nhật trạng thái từng tệp
@@ -508,23 +508,26 @@ async function poll(jobId){
 
     if(d.status==="done"){
       setProgress(100,"Hoàn tất "+d.ok_count+"/"+d.total_files+" tệp");
-      // hiển thị lỗi nếu có
       const errs=d.results.filter(r=>!r.ok);
-      errs.forEach((r)=>{ const i=selected.findIndex(f=>f.name===r.name);
-        if(i>=0) setStatus(i,"err",(r.error||"lỗi").slice(0,40)); });
       if(d.has_download){
         const total=d.results.filter(r=>r.ok).reduce((s,r)=>s+(r.count||0),0);
         $("#dlName").textContent=d.download_name;
         $("#dlInfo").textContent=d.ok_count+" tệp • "+total+" bìa"
-          +(d.download_kind==="zip"?" • đóng gói ZIP":"");
+          +(d.download_kind==="zip"?" • đóng gói ZIP":"")
+          +(errs.length?(" • "+errs.length+" tệp lỗi"):"");
         $("#dlLink").href="/jobs/"+jobId+"/download";
         $("#dlcard").style.display="flex";
         toast("Đã tạo xong "+total+" bìa ✔");
       } else { toast("Không tạo được tệp nào",true); }
-      break;
+      // Gom lỗi vào 1 toast (vì danh sách tệp sẽ được xóa ngay sau đây)
+      if(errs.length){
+        toast("Tệp lỗi: "+errs.map(r=>r.name).join(", "),true);
+      }
+      return true;   // báo job đã hoàn tất để xóa cache danh sách
     }
     await sleep(400);
   }
+  return false;
 }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
@@ -543,7 +546,12 @@ $("#btnGen").addEventListener("click",async()=>{
     const res=await fetch("/jobs",{method:"POST",body:fd});
     const d=await res.json();
     if(!d.ok){ toast(d.error,true); }
-    else { await poll(d.job_id); }
+    else {
+      const finished=await poll(d.job_id);
+      // Xóa cache danh sách tệp khi đã xử lý xong -> upload đợt mới không bị
+      // khử trùng với file cũ (kể cả trùng tên).
+      if(finished){ selected=[]; statuses=[]; fileInput.value=""; }
+    }
   }catch(e){ toast("Lỗi: "+e,true); }
   finally{ busy=false; btn.disabled=false; sp.style.display="none"; renderFiles(); }
 });
