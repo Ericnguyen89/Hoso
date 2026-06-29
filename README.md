@@ -24,7 +24,17 @@ Giữ nguyên font, khung viền và bố cục của tệp mẫu; mỗi dòng d
 | F | Thời hạn bảo quản |
 | G | Dòng phông (đầu bìa) |
 
-## Cài đặt nhanh (tự động) — khuyến nghị
+## Chạy ngay, KHÔNG cần venv
+
+```bash
+python3 app.py
+```
+
+Lần đầu nếu thiếu thư viện, `app.py` **tự cài** (flask, python-docx, openpyxl, lxml)
+bằng đúng Python đang chạy rồi tự nạp lại — không cần tạo/kích hoạt môi trường ảo.
+Sau đó mở http://127.0.0.1:5019
+
+## Cài đặt nhanh (tự động) — cho máy chủ/triển khai
 
 ```bash
 chmod +x install.sh

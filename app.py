@@ -2,20 +2,63 @@
 """
 Web app (Flask) tạo bìa hồ sơ lưu trữ hàng loạt từ Excel.
 
-Chạy:
-    .venv/bin/python app.py
-rồi mở:  http://127.0.0.1:5000
+Chạy trực tiếp, KHÔNG cần venv:
+    python3 app.py
+(Lần đầu thiếu thư viện, app sẽ tự cài rồi chạy lại.)
+Sau đó mở:  http://127.0.0.1:5019
 """
 
 import io
 import os
+import sys
 import uuid
 import datetime
+import importlib.util
+import subprocess
 
-from flask import (Flask, request, jsonify, send_file,
+
+def ensure_deps():
+    """Tự cài các thư viện còn thiếu bằng đúng Python đang chạy, rồi nạp lại.
+    Nhờ vậy app chạy được mà không cần tạo/kích hoạt môi trường ảo (venv)."""
+    need = []
+    for module, pip_name in (("flask", "flask"),
+                             ("docx", "python-docx"),
+                             ("openpyxl", "openpyxl"),
+                             ("lxml", "lxml")):
+        if importlib.util.find_spec(module) is None:
+            need.append(pip_name)
+    if not need:
+        return
+
+    print("• Thiếu thư viện: %s — đang tự cài đặt..." % ", ".join(need))
+    base = [sys.executable, "-m", "pip", "install", "--quiet"]
+    # Trong venv: cài thẳng. Ngoài venv: ưu tiên user site, rồi phá khóa PEP668.
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    attempts = ([[]] if in_venv else [["--user"]]) + [["--break-system-packages"], []]
+
+    last = None
+    for extra in attempts:
+        r = subprocess.run(base + extra + need,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode == 0:
+            break
+        last = r.stdout
+    else:
+        if last:
+            sys.stdout.buffer.write(last)
+        sys.exit("Không tự cài được. Hãy chạy thủ công:\n"
+                 "  %s -m pip install %s" % (sys.executable, " ".join(need)))
+
+    # Nạp lại tiến trình để dùng thư viện vừa cài
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+ensure_deps()
+
+from flask import (Flask, request, jsonify, send_file,  # noqa: E402
                    render_template_string, abort)
 
-import tao_bia
+import tao_bia  # noqa: E402
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB
