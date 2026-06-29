@@ -60,33 +60,28 @@ from flask import (Flask, request, jsonify, send_file,  # noqa: E402
 
 import tao_bia  # noqa: E402
 
+import threading      # noqa: E402
+import zipfile        # noqa: E402
+
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB (nhiều tệp)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Bộ nhớ tạm cho file kết quả: token -> {bytes, name, time}
-STORE = {}
-
-
-def cleanup():
-    """Xóa kết quả cũ hơn 1 giờ."""
-    now = datetime.datetime.now()
-    for k in list(STORE):
-        if (now - STORE[k]["time"]).total_seconds() > 3600:
-            STORE.pop(k, None)
-
-
-def pick_default(pattern, exclude=()):
-    return tao_bia.autofind(HERE, pattern, exclude)
-
-
-@app.route("/")
-def index():
-    return render_template_string(PAGE)
-
+# Bộ nhớ tạm cho công việc: job_id -> dict trạng thái + kết quả
+JOBS = {}
+JOBS_LOCK = threading.Lock()
 
 # Thư mục chứa tệp mẫu .docx (chỉ dev cấu hình, người dùng không thấy)
 TEMPLATE_DIR = os.environ.get("BIA_TEMPLATE_DIR", HERE)
+
+
+def cleanup():
+    """Xóa job cũ hơn 1 giờ."""
+    now = datetime.datetime.now()
+    with JOBS_LOCK:
+        for k in list(JOBS):
+            if (now - JOBS[k]["created"]).total_seconds() > 3600:
+                JOBS.pop(k, None)
 
 
 def _template_bytes():
@@ -100,76 +95,155 @@ def _template_bytes():
         return f.read()
 
 
-def _load_data(req):
-    """Lấy bytes Excel từ request (bắt buộc người dùng tải lên)."""
-    data_file = req.files.get("data")
-    if not (data_file and data_file.filename):
-        raise ValueError("Vui lòng chọn tệp Excel (.xlsx).")
-    if not data_file.filename.lower().endswith((".xlsx", ".xlsm")):
-        raise ValueError("Tệp dữ liệu phải có đuôi .xlsx")
-    return data_file.read(), data_file.filename
+@app.route("/")
+def index():
+    return render_template_string(PAGE)
 
 
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    """Đọc dữ liệu, trả về số bìa + vài dòng xem trước (không tạo file)."""
-    try:
-        data_bytes, data_name = _load_data(request)
-        import openpyxl
-        ws = openpyxl.load_workbook(io.BytesIO(data_bytes),
-                                    data_only=True).worksheets[0]
-        rows = tao_bia.read_rows_ws(ws)
-        if not rows:
-            raise ValueError("Không đọc được dòng dữ liệu nào từ Excel.")
-        preview = [{
-            "ho_so_so": r["ho_so_so"],
-            "title": r["title"],
-            "start": r["start"],
-            "end": r["end"],
-            "so_trang": r["so_trang"],
-            "so_tl": r["so_tl"],
-            "thbq": r["thbq"],
-            "org": r["org"],
-        } for r in rows[:8]]
-        return jsonify(ok=True, count=len(rows), preview=preview,
-                       data_name=data_name)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e)), 400
+def _process_job(job_id, files, template_bytes):
+    """Chạy nền: xử lý tuần tự từng tệp Excel, cập nhật tiến độ realtime."""
+    job = JOBS[job_id]
+    total = len(files)
+    outputs = []   # (tên_docx, bytes)
+
+    for i, (name, blob) in enumerate(files):
+        with JOBS_LOCK:
+            job["file_index"] = i + 1
+            job["current"] = name
+            job["current_done"] = 0
+            job["current_total"] = 0
+
+        def cb(done, tot, _i=i):
+            with JOBS_LOCK:
+                job["current_done"] = done
+                job["current_total"] = tot
+                # % tổng = (số tệp xong + phần đang xử lý) / tổng tệp
+                frac = (done / tot) if tot else 0
+                job["percent"] = round((_i + frac) / total * 100, 1)
+
+        try:
+            out_bytes, rows = tao_bia.generate_from_bytes(
+                template_bytes, blob, progress=cb)
+            base = os.path.splitext(os.path.basename(name))[0]
+            docx_name = "Bia_ho_so_%s.docx" % base
+            outputs.append((docx_name, out_bytes))
+            with JOBS_LOCK:
+                job["results"].append({
+                    "name": name, "ok": True,
+                    "count": len(rows), "out": docx_name,
+                    "size": len(out_bytes),
+                })
+        except Exception as e:
+            with JOBS_LOCK:
+                job["results"].append({
+                    "name": name, "ok": False, "error": str(e),
+                })
+        with JOBS_LOCK:
+            job["percent"] = round((i + 1) / total * 100, 1)
+
+    # Gói kết quả: 1 docx -> tải thẳng .docx; nhiều -> đóng gói .zip
+    with JOBS_LOCK:
+        if len(outputs) == 1:
+            job["download_name"] = outputs[0][0]
+            job["download_bytes"] = outputs[0][1]
+            job["download_kind"] = "docx"
+        elif len(outputs) > 1:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                seen = {}
+                for nm, data in outputs:
+                    # tránh trùng tên trong zip
+                    if nm in seen:
+                        seen[nm] += 1
+                        root, ext = os.path.splitext(nm)
+                        nm = "%s (%d)%s" % (root, seen[nm], ext)
+                    else:
+                        seen[nm] = 0
+                    z.writestr(nm, data)
+            job["download_name"] = "Bia_ho_so_%d_tep.zip" % len(outputs)
+            job["download_bytes"] = buf.getvalue()
+            job["download_kind"] = "zip"
+        job["status"] = "done"
+        job["percent"] = 100.0
+        job["ok_count"] = len(outputs)
 
 
-@app.route("/generate", methods=["POST"])
-def generate():
-    """Tạo file docx, lưu tạm, trả token để tải về."""
+@app.route("/jobs", methods=["POST"])
+def create_job():
+    """Nhận nhiều tệp Excel, tạo job nền, trả job_id ngay (không chặn UI)."""
     cleanup()
     try:
-        data_bytes, data_name = _load_data(request)
-        out_bytes, rows = tao_bia.generate_from_bytes(_template_bytes(), data_bytes)
-        token = uuid.uuid4().hex
-        base = os.path.splitext(os.path.basename(data_name))[0]
-        STORE[token] = {
-            "bytes": out_bytes,
-            "name": "Bia_ho_so_%s.docx" % base,
-            "time": datetime.datetime.now(),
-        }
-        return jsonify(ok=True, count=len(rows), token=token,
-                       filename=STORE[token]["name"],
-                       size=len(out_bytes))
+        uploads = request.files.getlist("data")
+        files = []
+        for f in uploads:
+            if not (f and f.filename):
+                continue
+            if not f.filename.lower().endswith((".xlsx", ".xlsm")):
+                raise ValueError("Tệp '%s' không phải .xlsx" % f.filename)
+            files.append((f.filename, f.read()))
+        if not files:
+            raise ValueError("Vui lòng chọn ít nhất một tệp Excel (.xlsx).")
+        template_bytes = _template_bytes()  # lỗi mẫu sẽ báo ngay tại đây
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
 
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "status": "running",
+            "total_files": len(files),
+            "file_index": 0,
+            "current": "",
+            "current_done": 0,
+            "current_total": 0,
+            "percent": 0.0,
+            "results": [],
+            "ok_count": 0,
+            "download_name": None,
+            "download_bytes": None,
+            "download_kind": None,
+            "created": datetime.datetime.now(),
+        }
+    t = threading.Thread(target=_process_job,
+                         args=(job_id, files, template_bytes), daemon=True)
+    t.start()
+    return jsonify(ok=True, job_id=job_id, total_files=len(files))
 
-@app.route("/download/<token>")
-def download(token):
-    item = STORE.get(token)
-    if not item:
+
+@app.route("/jobs/<job_id>")
+def job_status(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify(ok=False, error="Không tìm thấy công việc."), 404
+    with JOBS_LOCK:
+        return jsonify(
+            ok=True,
+            status=job["status"],
+            percent=job["percent"],
+            total_files=job["total_files"],
+            file_index=job["file_index"],
+            current=job["current"],
+            current_done=job["current_done"],
+            current_total=job["current_total"],
+            results=job["results"],
+            ok_count=job["ok_count"],
+            has_download=job["download_bytes"] is not None,
+            download_name=job["download_name"],
+            download_kind=job["download_kind"],
+        )
+
+
+@app.route("/jobs/<job_id>/download")
+def job_download(job_id):
+    job = JOBS.get(job_id)
+    if not job or job["download_bytes"] is None:
         abort(404)
-    return send_file(
-        io.BytesIO(item["bytes"]),
-        mimetype="application/vnd.openxmlformats-officedocument."
-                 "wordprocessingml.document",
-        as_attachment=True,
-        download_name=item["name"],
-    )
+    kind = job["download_kind"]
+    mime = ("application/zip" if kind == "zip" else
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document")
+    return send_file(io.BytesIO(job["download_bytes"]), mimetype=mime,
+                     as_attachment=True, download_name=job["download_name"])
 
 
 # --------------------------- Giao diện (HTML) ---------------------------------
@@ -261,6 +335,28 @@ PAGE = r"""
   .dlcard .meta .a{font-weight:700}
   .dlcard .meta .b{color:var(--muted);font-size:13px}
   footer{color:#a5b4fc;text-align:center;font-size:13px;margin-top:24px}
+
+  /* Danh sách tệp đã chọn */
+  .files{margin-top:14px;display:none;flex-direction:column;gap:8px}
+  .frow{display:flex;align-items:center;gap:10px;background:#f8fafc;
+        border:1px solid var(--line);border-radius:12px;padding:9px 12px;font-size:14px}
+  .frow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+  .frow .st{font-size:12px;font-weight:700;padding:2px 9px;border-radius:999px;white-space:nowrap}
+  .frow .st.wait{background:#e2e8f0;color:#475569}
+  .frow .st.run{background:#e0e7ff;color:#4338ca}
+  .frow .st.ok{background:#dcfce7;color:#15803d}
+  .frow .st.err{background:#fee2e2;color:#b91c1c}
+
+  /* Tiến độ */
+  .progress{margin-top:20px;display:none}
+  .progress .lab{display:flex;justify-content:space-between;font-size:13px;
+        color:var(--muted);margin-bottom:6px}
+  .progress .lab b{color:var(--ink)}
+  .bar{height:14px;background:#e2e8f0;border-radius:999px;overflow:hidden}
+  .bar .fill{height:100%;width:0;border-radius:999px;transition:width .25s ease;
+        background:linear-gradient(90deg,var(--brand),var(--brand2));
+        background-size:200% 100%;animation:flow 1.4s linear infinite}
+  @keyframes flow{to{background-position:200% 0}}
 </style>
 </head>
 <body>
@@ -268,23 +364,25 @@ PAGE = r"""
   <header>
     <span class="badge">📚 Lưu trữ • Tự động hóa</span>
     <h1>Tạo bìa hồ sơ hàng loạt</h1>
-    <p>Tải lên tệp mẫu (.docx) và dữ liệu (.xlsx) — hệ thống xuất bìa A4 cho mỗi hồ sơ.</p>
+    <p>Chọn một hoặc nhiều tệp Excel (.xlsx) — hệ thống xử lý tuần tự, xuất bìa A4 cho mỗi hồ sơ.</p>
   </header>
 
   <div class="card">
     <label class="drop" id="dropData">
       <div class="ico">📊</div>
-      <div class="t">Chọn tệp Excel (.xlsx)</div>
+      <div class="t">Chọn tệp Excel (.xlsx) — có thể chọn nhiều</div>
       <div class="s">Kéo thả vào đây hoặc bấm để chọn từ máy</div>
       <div class="fname" id="nameData"></div>
-      <input type="file" id="fileData" accept=".xlsx,.xlsm">
+      <input type="file" id="fileData" accept=".xlsx,.xlsm" multiple>
     </label>
+
+    <div class="files" id="files"></div>
 
     <div class="actions">
       <button class="btn-primary" id="btnGen">
         <span class="spin" id="spinGen"></span>✨ Tạo bìa &amp; tải về
       </button>
-      <button class="btn-ghost" id="btnAnalyze">🔍 Xem trước</button>
+      <button class="btn-ghost" id="btnClear">🗑️ Xóa danh sách</button>
     </div>
 
     <div class="hint">
@@ -293,30 +391,21 @@ PAGE = r"""
       · <b>D</b>=Số trang · <b>E</b>=Số TL · <b>F</b>=Thời hạn BQ · <b>G</b>=Dòng phông.
     </div>
 
+    <div class="progress" id="progress">
+      <div class="lab">
+        <span id="progText">Đang chuẩn bị…</span>
+        <b id="progPct">0%</b>
+      </div>
+      <div class="bar"><div class="fill" id="progFill"></div></div>
+    </div>
+
     <div class="dlcard" id="dlcard">
       <div class="ic">✓</div>
       <div class="meta">
         <div class="a" id="dlName"></div>
         <div class="b" id="dlInfo"></div>
       </div>
-      <a id="dlLink"><button class="btn-primary">⬇️ Tải file Word</button></a>
-    </div>
-
-    <div class="panel" id="panel">
-      <div class="stat">
-        <div class="box"><div class="n" id="stCount">0</div><div class="l">Tổng số bìa</div></div>
-        <div class="box"><div class="n" id="stData" style="font-size:15px"></div><div class="l">Tệp dữ liệu</div></div>
-      </div>
-      <div style="font-weight:700;margin:6px 0 8px">Xem trước (tối đa 8 hồ sơ đầu)</div>
-      <div class="tablewrap">
-        <table>
-          <thead><tr>
-            <th>Hồ sơ số</th><th>Tiêu đề</th><th>Bắt đầu</th><th>Kết thúc</th>
-            <th>Trang</th><th>Số TL</th><th>THBQ</th>
-          </tr></thead>
-          <tbody id="tbody"></tbody>
-        </table>
-      </div>
+      <a id="dlLink"><button class="btn-primary">⬇️ Tải kết quả</button></a>
     </div>
   </div>
 
@@ -327,87 +416,136 @@ PAGE = r"""
 
 <script>
 const $=s=>document.querySelector(s);
-const fileData=$("#fileData");
-
-function bind(drop, input, nameEl){
-  // Lưu ý: KHÔNG gọi input.click() ở đây. Vùng chọn là thẻ <label> nên
-  // bấm vào đã tự mở hộp thoại; gọi thêm sẽ khiến hộp thoại bật 2 lần.
-  input.addEventListener("change",()=>{
-    if(input.files[0]){ nameEl.textContent=input.files[0].name; drop.classList.add("has"); }
-  });
-  ["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{
-    e.preventDefault();drop.classList.add("drag");}));
-  ["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{
-    e.preventDefault();drop.classList.remove("drag");}));
-  drop.addEventListener("drop",e=>{
-    const f=e.dataTransfer.files[0]; if(!f)return;
-    input.files=e.dataTransfer.files; nameEl.textContent=f.name; drop.classList.add("has");
-  });
-}
-bind($("#dropData"),fileData,$("#nameData"));
+const fileInput=$("#fileData"), drop=$("#dropData");
+let selected=[];          // danh sách File đang chọn
+let statuses=[];          // trạng thái hiển thị song song với selected
+let busy=false;
 
 let toastTimer;
 function toast(msg,bad){
   const t=$("#toast"); t.textContent=msg; t.className="toast show"+(bad?" bad":"");
-  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className="toast",3200);
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className="toast",3500);
 }
 function esc(s){return (s??"").toString().replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function fmtKB(b){return (b/1024).toFixed(0)+" KB";}
 
-function payload(){
-  const fd=new FormData();
-  if(fileData.files[0]) fd.append("data",fileData.files[0]);
-  return fd;
+function addFiles(list){
+  for(const f of list){
+    if(!/\.xlsx?$/i.test(f.name)){ toast("Bỏ qua (không phải .xlsx): "+f.name,true); continue; }
+    if(!selected.some(x=>x.name===f.name && x.size===f.size)){
+      selected.push(f); statuses.push({cls:"wait",txt:"chờ"});
+    }
+  }
+  renderFiles();
 }
-function hasFile(){
-  if(!fileData.files[0]){ toast("Vui lòng chọn tệp Excel (.xlsx)",true); return false; }
-  return true;
+function renderFiles(){
+  const box=$("#files");
+  if(!selected.length){ box.style.display="none"; box.innerHTML=""; drop.classList.remove("has");
+    $("#nameData").textContent=""; return; }
+  drop.classList.add("has");
+  $("#nameData").textContent="Đã chọn "+selected.length+" tệp";
+  box.style.display="flex";
+  box.innerHTML=selected.map((f,i)=>{
+    const s=statuses[i]||{cls:"wait",txt:"chờ"};
+    return `<div class="frow" data-i="${i}">
+      <span>📄</span>
+      <span class="nm">${esc(f.name)}</span>
+      <span class="st ${s.cls}" id="st${i}">${esc(s.txt)}</span>
+      ${busy?"":`<span style="cursor:pointer;color:#94a3b8" data-rm="${i}">✕</span>`}
+    </div>`;
+  }).join("");
 }
-function renderPreview(d){
-  $("#stCount").textContent=d.count;
-  if(d.data_name) $("#stData").textContent=d.data_name;
-  const tb=$("#tbody"); tb.innerHTML="";
-  (d.preview||[]).forEach(r=>{
-    const tr=document.createElement("tr");
-    tr.innerHTML=`<td><b>${esc(r.ho_so_so)}</b></td>
-      <td class="title">${esc(r.title)}</td>
-      <td>${esc(r.start)}</td><td>${esc(r.end)}</td>
-      <td>${esc(r.so_trang)}</td><td>${esc(r.so_tl)}</td><td>${esc(r.thbq)}</td>`;
-    tb.appendChild(tr);
-  });
-  $("#panel").style.display="block";
-}
-
-$("#btnAnalyze").addEventListener("click",async()=>{
-  if(!hasFile()) return;
-  try{
-    const res=await fetch("/analyze",{method:"POST",body:payload()});
-    const d=await res.json();
-    if(!d.ok) return toast(d.error,true);
-    renderPreview(d); $("#dlcard").style.display="none";
-    toast("Đã phân tích: "+d.count+" hồ sơ");
-  }catch(e){toast("Lỗi: "+e,true);}
+$("#files").addEventListener("click",e=>{
+  const rm=e.target.getAttribute("data-rm");
+  if(rm!==null && !busy){ selected.splice(+rm,1); statuses.splice(+rm,1); renderFiles(); }
 });
 
+// Chọn file: gộp vào danh sách (KHÔNG gọi input.click vì label đã tự mở)
+fileInput.addEventListener("change",()=>{ addFiles(fileInput.files); fileInput.value=""; });
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{
+  e.preventDefault();drop.classList.add("drag");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{
+  e.preventDefault();drop.classList.remove("drag");}));
+drop.addEventListener("drop",e=>{ if(e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+
+$("#btnClear").addEventListener("click",()=>{
+  if(busy) return; selected=[]; statuses=[]; renderFiles();
+  $("#progress").style.display="none"; $("#dlcard").style.display="none";
+});
+
+function setStatus(i,cls,txt){
+  statuses[i]={cls,txt};
+  const el=$("#st"+i); if(el){ el.className="st "+cls; el.textContent=txt; }
+}
+function setProgress(p,text){
+  $("#progress").style.display="block";
+  $("#progFill").style.width=Math.max(2,p)+"%";
+  $("#progPct").textContent=Math.round(p)+"%";
+  if(text!==undefined) $("#progText").textContent=text;
+}
+
+async function poll(jobId){
+  while(true){
+    let d;
+    try{ d=await (await fetch("/jobs/"+jobId)).json(); }
+    catch(_){ await sleep(600); continue; }
+    if(!d.ok){ toast(d.error||"Mất công việc",true); break; }
+
+    setProgress(d.percent);
+    // cập nhật trạng thái từng tệp
+    const done=d.results.length;
+    selected.forEach((f,i)=>{
+      if(i<done){ const r=d.results[i];
+        if(r.ok) setStatus(i,"ok",r.count+" bìa ✓"); else setStatus(i,"err","lỗi");
+      } else if(i===done && d.status==="running"){ setStatus(i,"run","đang xử lý…"); }
+      else setStatus(i,"wait","chờ");
+    });
+
+    if(d.status==="running"){
+      const ct=d.current_total?(" — "+d.current_done+"/"+d.current_total+" bìa"):"";
+      setProgress(d.percent,"Đang xử lý tệp "+d.file_index+"/"+d.total_files+": "+(d.current||"")+ct);
+    }
+
+    if(d.status==="done"){
+      setProgress(100,"Hoàn tất "+d.ok_count+"/"+d.total_files+" tệp");
+      // hiển thị lỗi nếu có
+      const errs=d.results.filter(r=>!r.ok);
+      errs.forEach((r)=>{ const i=selected.findIndex(f=>f.name===r.name);
+        if(i>=0) setStatus(i,"err",(r.error||"lỗi").slice(0,40)); });
+      if(d.has_download){
+        const total=d.results.filter(r=>r.ok).reduce((s,r)=>s+(r.count||0),0);
+        $("#dlName").textContent=d.download_name;
+        $("#dlInfo").textContent=d.ok_count+" tệp • "+total+" bìa"
+          +(d.download_kind==="zip"?" • đóng gói ZIP":"");
+        $("#dlLink").href="/jobs/"+jobId+"/download";
+        $("#dlcard").style.display="flex";
+        toast("Đã tạo xong "+total+" bìa ✔");
+      } else { toast("Không tạo được tệp nào",true); }
+      break;
+    }
+    await sleep(400);
+  }
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
 $("#btnGen").addEventListener("click",async()=>{
-  if(!hasFile()) return;
+  if(busy) return;
+  if(!selected.length){ toast("Vui lòng chọn ít nhất một tệp Excel",true); return; }
+  busy=true;
+  statuses=selected.map(()=>({cls:"wait",txt:"chờ"}));  // đặt lại trạng thái
   const btn=$("#btnGen"), sp=$("#spinGen");
-  btn.disabled=true; sp.style.display="inline-block";
+  btn.disabled=true; sp.style.display="inline-block"; $("#dlcard").style.display="none";
+  renderFiles();  // ẩn nút xóa từng dòng khi đang chạy
+  setProgress(0,"Đang tải lên & chuẩn bị…");
   try{
-    const res=await fetch("/generate",{method:"POST",body:payload()});
+    const fd=new FormData();
+    selected.forEach(f=>fd.append("data",f));
+    const res=await fetch("/jobs",{method:"POST",body:fd});
     const d=await res.json();
-    if(!d.ok) return toast(d.error,true);
-    // xem trước kèm theo (gọi analyze để có bảng)
-    try{
-      const a=await(await fetch("/analyze",{method:"POST",body:payload()})).json();
-      if(a.ok) renderPreview(a);
-    }catch(_){}
-    $("#dlName").textContent=d.filename;
-    $("#dlInfo").textContent=d.count+" bìa • "+(d.size/1024).toFixed(0)+" KB";
-    $("#dlLink").href="/download/"+d.token;
-    $("#dlcard").style.display="flex";
-    toast("Đã tạo "+d.count+" bìa ✔");
-  }catch(e){toast("Lỗi: "+e,true);}
-  finally{btn.disabled=false; sp.style.display="none";}
+    if(!d.ok){ toast(d.error,true); }
+    else { await poll(d.job_id); }
+  }catch(e){ toast("Lỗi: "+e,true); }
+  finally{ busy=false; btn.disabled=false; sp.style.display="none"; renderFiles(); }
 });
 </script>
 </body>

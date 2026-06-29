@@ -10,7 +10,8 @@ Giữ nguyên font, khung viền và bố cục của tệp mẫu; mỗi dòng d
 - Điền dữ liệu theo **nội dung** (không phụ thuộc số thứ tự đoạn) nên bền với thay đổi mẫu.
 - **Khối dưới** (Phông số, ngày, số trang…) được neo cố định ở **đáy trang** bằng một text box
   canh đáy riêng — tiêu đề dài bao nhiêu cũng không làm xê dịch.
-- Giao diện web hiện đại: kéo-thả Excel → xem trước → tải về `.docx`.
+- Giao diện web hiện đại: kéo-thả **nhiều** tệp Excel → xử lý **tuần tự** với
+  **thanh tiến độ realtime** (không đơ UI) → tải về `.docx` (1 tệp) hoặc `.zip` (nhiều tệp).
 
 ## Cấu trúc cột Excel (sheet đầu)
 

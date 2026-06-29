@@ -310,8 +310,9 @@ def restructure_cover(cover_p):
     run2.append(draw2)
 
 
-def build_document_xml(doc_xml, rows):
-    """Từ document.xml của mẫu + danh sách dòng -> document.xml mới (bytes)."""
+def build_document_xml(doc_xml, rows, progress=None):
+    """Từ document.xml của mẫu + danh sách dòng -> document.xml mới (bytes).
+    progress(done, total): hàm tùy chọn báo tiến độ sau mỗi bìa."""
     root = etree.fromstring(doc_xml)
     body = root.find(w("body"))
 
@@ -347,6 +348,8 @@ def build_document_xml(doc_xml, rows):
                 cp.insert(0, ppr)
             etree.SubElement(ppr, w("pageBreakBefore"))
         body.append(cp)
+        if progress is not None:
+            progress(idx + 1, len(rows))
 
     body.append(sectpr)
     return etree.tostring(root, xml_declaration=True,
@@ -368,15 +371,16 @@ def assemble_docx(mau_bytes, new_document_xml):
     return out.getvalue()
 
 
-def generate_from_bytes(mau_bytes, data_bytes):
-    """Lõi dùng cho web: nhận bytes mẫu + bytes Excel -> (docx bytes, danh sách dòng)."""
+def generate_from_bytes(mau_bytes, data_bytes, progress=None):
+    """Lõi dùng cho web: nhận bytes mẫu + bytes Excel -> (docx bytes, danh sách dòng).
+    progress(done, total): hàm tùy chọn báo tiến độ realtime."""
     import io, zipfile
     rows = read_rows_ws(
         openpyxl.load_workbook(io.BytesIO(data_bytes), data_only=True).worksheets[0])
     if not rows:
         raise ValueError("Không đọc được dòng dữ liệu nào từ Excel.")
     doc_xml = zipfile.ZipFile(io.BytesIO(mau_bytes)).read("word/document.xml")
-    new_doc = build_document_xml(doc_xml, rows)
+    new_doc = build_document_xml(doc_xml, rows, progress=progress)
     return assemble_docx(mau_bytes, new_doc), rows
 
 
