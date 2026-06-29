@@ -330,7 +330,8 @@ const $=s=>document.querySelector(s);
 const fileData=$("#fileData");
 
 function bind(drop, input, nameEl){
-  drop.addEventListener("click",()=>input.click());
+  // Lưu ý: KHÔNG gọi input.click() ở đây. Vùng chọn là thẻ <label> nên
+  // bấm vào đã tự mở hộp thoại; gọi thêm sẽ khiến hộp thoại bật 2 lần.
   input.addEventListener("change",()=>{
     if(input.files[0]){ nameEl.textContent=input.files[0].name; drop.classList.add("has"); }
   });
