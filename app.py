@@ -352,14 +352,20 @@ PAGE = r"""
   .frow .st.ok{background:#dcfce7;color:#15803d}
   .frow .st.err{background:#fee2e2;color:#b91c1c}
 
-  /* Ô nhập Phông số / Mục lục số */
-  .fields{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}
-  @media (max-width:560px){.fields{grid-template-columns:1fr}}
-  .field label{display:block;font-size:13px;font-weight:700;color:#334155;margin-bottom:6px}
-  .field input{width:100%;font:inherit;padding:11px 13px;border:1px solid var(--line);
+  /* Thanh công cụ: ô nhập + nút cùng một hàng */
+  .toolbar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;margin-top:18px}
+  .toolbar .field{flex:0 0 auto;width:120px}
+  .toolbar #btnGen{margin-left:auto}   /* đẩy cụm nút sang phải */
+  .field label{display:block;font-size:12px;font-weight:700;color:#475569;
+        margin-bottom:6px;text-transform:uppercase;letter-spacing:.03em}
+  .field input{width:100%;font:inherit;padding:12px 13px;border:1px solid var(--line);
         border-radius:11px;background:#f8fafc;transition:.15s}
   .field input:focus{outline:none;border-color:var(--brand);background:#fff;
         box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+  @media (max-width:560px){
+    .toolbar .field{flex:1 1 120px}
+    .toolbar #btnGen,.toolbar #btnClear{flex:1 1 auto;justify-content:center;margin-left:0}
+  }
 
   /* Tiến độ */
   .progress{margin-top:20px;display:none}
@@ -392,18 +398,15 @@ PAGE = r"""
 
     <div class="files" id="files"></div>
 
-    <div class="fields">
+    <div class="toolbar">
       <div class="field">
         <label for="phongSo">Phông số</label>
-        <input id="phongSo" type="text" value="001" placeholder="vd: 001" autocomplete="off">
+        <input id="phongSo" type="text" value="001" placeholder="001" autocomplete="off">
       </div>
       <div class="field">
         <label for="mucLuc">Mục lục số</label>
-        <input id="mucLuc" type="text" value="01" placeholder="vd: 01" autocomplete="off">
+        <input id="mucLuc" type="text" value="01" placeholder="01" autocomplete="off">
       </div>
-    </div>
-
-    <div class="actions">
       <button class="btn-primary" id="btnGen">
         <span class="spin" id="spinGen"></span>✨ Tạo bìa &amp; tải về
       </button>
