@@ -73,14 +73,20 @@ def runs_text(p):
 
 
 def set_run_text(run, text):
-    """Đặt lại văn bản cho 1 run, giữ nguyên định dạng (rPr) và xml:space."""
-    # Xóa các node text/tab cũ, thêm 1 <w:t> mới (giữ rPr ở đầu)
+    """Đặt lại văn bản cho 1 run, giữ nguyên định dạng (rPr).
+    Nếu text chứa ký tự xuống dòng (\\n) thì chèn <w:br/> để Word ngắt dòng
+    đúng (vd dòng phông ở cột G nhập nhiều dòng bằng Alt+Enter trong Excel)."""
+    # Xóa các node văn bản/tab/ngắt-dòng cũ (giữ rPr ở đầu)
     for child in list(run):
-        if child.tag in (w("t"), w("tab")):
+        if child.tag in (w("t"), w("tab"), w("br")):
             run.remove(child)
-    t = etree.SubElement(run, w("t"))
-    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    t.text = text
+    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for i, line in enumerate(lines):
+        if i > 0:
+            etree.SubElement(run, w("br"))   # ngắt dòng trong cùng đoạn
+        t = etree.SubElement(run, w("t"))
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        t.text = line
 
 
 def replace_in_paragraph(p, old, new):
