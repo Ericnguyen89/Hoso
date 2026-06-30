@@ -100,7 +100,7 @@ def index():
     return render_template_string(PAGE)
 
 
-def _process_job(job_id, files, template_bytes):
+def _process_job(job_id, files, template_bytes, phong_so, muc_luc):
     """Chạy nền: xử lý tuần tự từng tệp Excel, cập nhật tiến độ realtime."""
     job = JOBS[job_id]
     total = len(files)
@@ -123,7 +123,8 @@ def _process_job(job_id, files, template_bytes):
 
         try:
             out_bytes, rows = tao_bia.generate_from_bytes(
-                template_bytes, blob, progress=cb)
+                template_bytes, blob, progress=cb,
+                phong_so=phong_so, muc_luc=muc_luc)
             base = os.path.splitext(os.path.basename(name))[0]
             docx_name = "Bia_ho_so_%s.docx" % base
             outputs.append((docx_name, out_bytes))
@@ -183,6 +184,9 @@ def create_job():
             files.append((f.filename, f.read()))
         if not files:
             raise ValueError("Vui lòng chọn ít nhất một tệp Excel (.xlsx).")
+        # Phông số / Mục lục số do người dùng nhập (mặc định 001 / 01)
+        phong_so = (request.form.get("phong_so") or "").strip() or "001"
+        muc_luc = (request.form.get("muc_luc") or "").strip() or "01"
         template_bytes = _template_bytes()  # lỗi mẫu sẽ báo ngay tại đây
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
@@ -205,7 +209,8 @@ def create_job():
             "created": datetime.datetime.now(),
         }
     t = threading.Thread(target=_process_job,
-                         args=(job_id, files, template_bytes), daemon=True)
+                         args=(job_id, files, template_bytes, phong_so, muc_luc),
+                         daemon=True)
     t.start()
     return jsonify(ok=True, job_id=job_id, total_files=len(files))
 
@@ -347,6 +352,15 @@ PAGE = r"""
   .frow .st.ok{background:#dcfce7;color:#15803d}
   .frow .st.err{background:#fee2e2;color:#b91c1c}
 
+  /* Ô nhập Phông số / Mục lục số */
+  .fields{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}
+  @media (max-width:560px){.fields{grid-template-columns:1fr}}
+  .field label{display:block;font-size:13px;font-weight:700;color:#334155;margin-bottom:6px}
+  .field input{width:100%;font:inherit;padding:11px 13px;border:1px solid var(--line);
+        border-radius:11px;background:#f8fafc;transition:.15s}
+  .field input:focus{outline:none;border-color:var(--brand);background:#fff;
+        box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+
   /* Tiến độ */
   .progress{margin-top:20px;display:none}
   .progress .lab{display:flex;justify-content:space-between;font-size:13px;
@@ -377,6 +391,17 @@ PAGE = r"""
     </label>
 
     <div class="files" id="files"></div>
+
+    <div class="fields">
+      <div class="field">
+        <label for="phongSo">Phông số</label>
+        <input id="phongSo" type="text" value="001" placeholder="vd: 001" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="mucLuc">Mục lục số</label>
+        <input id="mucLuc" type="text" value="01" placeholder="vd: 01" autocomplete="off">
+      </div>
+    </div>
 
     <div class="actions">
       <button class="btn-primary" id="btnGen">
@@ -543,6 +568,8 @@ $("#btnGen").addEventListener("click",async()=>{
   try{
     const fd=new FormData();
     selected.forEach(f=>fd.append("data",f));
+    fd.append("phong_so", $("#phongSo").value.trim());
+    fd.append("muc_luc", $("#mucLuc").value.trim());
     const res=await fetch("/jobs",{method:"POST",body:fd});
     const d=await res.json();
     if(!d.ok){ toast(d.error,true); }

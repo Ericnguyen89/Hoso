@@ -92,7 +92,30 @@ def replace_in_paragraph(p, old, new):
     return False
 
 
-def fill_textbox(txbx, row):
+def set_field_before_tab(p, value):
+    """Gộp `value` vào run ĐẬM đầu tiên nằm TRƯỚC dấu TAB đầu tiên của đoạn,
+    xóa văn bản các run đậm còn lại trong nhóm đó.
+
+    Dùng cho 'Phông số' (mẫu tách thành '0'+'01') và 'Mục lục số' ('01') —
+    giá trị nằm sau nhãn và trước dấu TAB ngăn cột phải."""
+    bold_runs = []
+    for r in p.findall(w("r")):
+        if r.find(w("tab")) is not None:      # gặp TAB ngăn cột -> dừng
+            break
+        rpr = r.find(w("rPr"))
+        is_bold = rpr is not None and rpr.find(w("b")) is not None
+        txt = "".join(t.text or "" for t in r.iter(w("t")))
+        if is_bold and txt.strip():
+            bold_runs.append(r)
+    if not bold_runs:
+        return False
+    set_run_text(bold_runs[0], value)
+    for r in bold_runs[1:]:
+        set_run_text(r, "")
+    return True
+
+
+def fill_textbox(txbx, row, phong_so=None, muc_luc=None):
     """Điền dữ liệu cho 1 text box (1 bìa).
 
     Định vị theo NỘI DUNG (giá trị mẫu) chứ không theo số thứ tự đoạn, nên
@@ -128,6 +151,15 @@ def fill_textbox(txbx, row):
                 break
     for r, new in todo:
         set_run_text(r, new)
+
+    # Phông số / Mục lục số: thay theo nhãn của đoạn (giá trị trước dấu TAB)
+    if phong_so or muc_luc:
+        for p in txbx.findall(w("p")):
+            txt = "".join(t.text or "" for t in p.iter(w("t")))
+            if phong_so and "Phông" in txt:
+                set_field_before_tab(p, phong_so)
+            elif muc_luc and "ục lục số" in txt:
+                set_field_before_tab(p, muc_luc)
 
 
 def normalize_date(token):
@@ -310,9 +342,10 @@ def restructure_cover(cover_p):
     run2.append(draw2)
 
 
-def build_document_xml(doc_xml, rows, progress=None):
+def build_document_xml(doc_xml, rows, progress=None, phong_so=None, muc_luc=None):
     """Từ document.xml của mẫu + danh sách dòng -> document.xml mới (bytes).
-    progress(done, total): hàm tùy chọn báo tiến độ sau mỗi bìa."""
+    progress(done, total): hàm tùy chọn báo tiến độ sau mỗi bìa.
+    phong_so / muc_luc: giá trị Phông số / Mục lục số do người dùng nhập."""
     root = etree.fromstring(doc_xml)
     body = root.find(w("body"))
 
@@ -339,7 +372,7 @@ def build_document_xml(doc_xml, rows, progress=None):
         cp = copy.deepcopy(cover_p)
         # Điền dữ liệu cho TẤT CẢ text box bên trong (Choice + Fallback)
         for txbx in cp.iter(w("txbxContent")):
-            fill_textbox(txbx, row)
+            fill_textbox(txbx, row, phong_so=phong_so, muc_luc=muc_luc)
         # Từ bìa thứ 2: ngắt sang trang mới
         if idx > 0:
             ppr = cp.find(w("pPr"))
@@ -371,16 +404,19 @@ def assemble_docx(mau_bytes, new_document_xml):
     return out.getvalue()
 
 
-def generate_from_bytes(mau_bytes, data_bytes, progress=None):
+def generate_from_bytes(mau_bytes, data_bytes, progress=None,
+                        phong_so=None, muc_luc=None):
     """Lõi dùng cho web: nhận bytes mẫu + bytes Excel -> (docx bytes, danh sách dòng).
-    progress(done, total): hàm tùy chọn báo tiến độ realtime."""
+    progress(done, total): hàm tùy chọn báo tiến độ realtime.
+    phong_so / muc_luc: giá trị Phông số / Mục lục số do người dùng nhập."""
     import io, zipfile
     rows = read_rows_ws(
         openpyxl.load_workbook(io.BytesIO(data_bytes), data_only=True).worksheets[0])
     if not rows:
         raise ValueError("Không đọc được dòng dữ liệu nào từ Excel.")
     doc_xml = zipfile.ZipFile(io.BytesIO(mau_bytes)).read("word/document.xml")
-    new_doc = build_document_xml(doc_xml, rows, progress=progress)
+    new_doc = build_document_xml(doc_xml, rows, progress=progress,
+                                 phong_so=phong_so, muc_luc=muc_luc)
     return assemble_docx(mau_bytes, new_doc), rows
 
 
